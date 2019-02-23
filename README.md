@@ -20,14 +20,14 @@ The tools that this program uses are:
   - Pilon
 
 The steps performed by this tool are:
-  1- Read mapping using HiSat2 to a chloroplast reference. Two possible inputs:
+  1. Read mapping using HiSat2 to a chloroplast reference. Two possible inputs:
 	a- Short read FASTQ dataset.
 	b- SRA accession
-  1- Sorting of the BAM file.
-  1- Coverage estimation of the mapping.
-  1- Variant calling.
-  1- Consensus calling.
-  1- Read remapping
-  1- Polishing
+  2. Sorting of the BAM file.
+  3. Coverage estimation of the mapping.
+  4. Variant calling.
+  5. Consensus calling.
+  6. Read remapping
+  7. Polishing
 
 
