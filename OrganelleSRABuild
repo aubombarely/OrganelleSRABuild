@@ -1,0 +1,891 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ OrganelleSRABuild
+ A pipeline to produce reference-based plastid genome assemblies from Illumina reads
+
+=cut
+
+our $version = '0.0.1';
+
+=head1 SYPNOSIS
+
+ OrganelleSRABuild [-h]  [-i <input_fastq>|-a <sra_accession>] -r <fasta_reference> -o <output_dir>
+                         [-s <species_name>] [-t <threads>] [-j <java_run_arguments>]
+                  
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -i
+
+B<input_fastq>           input short reads dataset(s) with FASTQ format. Comma separated. (Co-mandatory with -a)
+
+=item -a
+
+B<sra_accession>         input SRA accession(s) ID. Comma separated. (Co-mandatory with -i)
+
+=item -r
+
+B<fasta_reference>       organelle reference genome, fasta format (mandatory)
+
+=item -o
+
+B<output_dir>            output directory (mandatory)
+
+=item -s
+
+B<species_name>          species name (optional - default "Species" and "sps")
+
+=item -t
+
+B<number_of_threads>     number of threads (optional - default 1)
+
+=item -j
+
+B<java_run_arguments>    arguments for the Java run for pilon (e.g. "-Xmx8G" - default none)
+
+=item -V
+
+B<be_verbose>            be verbose and print the parsing status.
+
+=item -v
+
+B<version>               print version
+
+=item -h
+
+B<help>                  print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This program produces a reference based organelle assembly based in a Hisat2
+ mapping to a conserved reference.
+
+ The program accepts two types of inputs:
+  * Fastq files (-i) separated by commas. Pair end files can be specified between 
+    curly brackets, no commas (e.g. {File1_R1}{File1_R2},{File2_R1}{File2_R2}.
+  * SRA accessions (-a) separated by commas. 
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely.
+  (aureliano.bombarely@unimi.it).
+
+=cut
+
+=head1 METHODS
+
+ OrganelleSRABuild
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use File::Spec;
+use File::Basename;
+use File::Copy;
+use File::Path qw(make_path remove_tree);
+use IPC::Cmd qw[can_run run];
+
+use Bio::SeqIO;
+use Bio::Tools::Run::StandAloneBlastPlus;
+
+use Math::BigFloat;
+
+our ($opt_i, $opt_a, $opt_r, $opt_o, $opt_s, $opt_t, $opt_j,
+     $opt_V, $opt_v, $opt_h);
+
+getopts("i:a:r:o:s:t:Vvh");
+if (!$opt_i && !$opt_a && !$opt_r && !$opt_o && !$opt_s && !$opt_t && !$opt_j && 
+    !$opt_V && !$opt_v && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+elsif ($opt_v) {
+    print STDERR "\nOrganelleSRABuild version:$version\n";
+    print STDERR "Developed at the Bombarely Laboratory (2019-02-25)\n\n";
+    exit(1);
+}
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## OrganelleSRABuild Starts ($date) ##\n";
+print STDERR "############################################################\n\n";
+
+## Define a variable to keep the stats;
+
+my %gstats = ();
+
+print_header("0) Checking arguments");
+
+##############################################################################
+## CHECK ARGUMENTS
+##############################################################################
+
+## Get the arguments and check them
+
+my @input_list = ();
+my $input_type = "";
+
+if ($opt_i) {
+
+	@input_list = split(/,/, $opt_i);
+	$input_type = "FASTQ";
+	if ($opt_a) {
+
+		die("\nERROR: Option -i already used. Incompatible with -a\n");
+	}
+}
+elsif ($opt_a) {
+	
+	@input_list = split(/,/, $opt_a);
+	$input_type = "SRA"; 
+}
+else {
+
+	die("\nERROR: No input options (-i or -a) were used.\n"); 
+}
+
+print STDERR "\tInput type: $input_type\n";
+print STDERR "\tInput list:\n";
+foreach my $in (@input_list) {
+
+	print "\t\t* $in\n";
+}
+
+my $outdir = $opt_o ||
+    die("\nINPUT ARG. ERROR: -o <output_dir> argument was not supplied.\n\n");
+
+print STDERR "\tOutput directory: $outdir\n";
+
+unless (-d $outdir) {
+
+    die("\nERROR: Out directory does not exist. Please create it.\n\n");
+}
+    
+my $orgref = $opt_r ||
+    die("\nINPUT ARG. ERROR: -r <fasta_ref> argument was not supplied.\n\n"); 
+
+print STDERR "\tOrganelle reference fasta file: $orgref\n";
+
+my $refsize;
+unless (-s $orgref) {
+
+    die("ERROR: Organelle reference fasta files does not exist.\n\n");
+}
+else {
+
+    ## It will get the size and use for est_size
+    ## Also, produce a warning if more than one sequence is in the ref file
+
+    my $refc = 0;
+
+    my $ref_seqio = Bio::SeqIO->new( -file => $orgref, -type => 'fasta' );
+    while( my $refseq = $ref_seqio->next_seq() ) {
+    
+	my $refid = $refseq->id();
+	my $ref_l = $refseq->length();
+	$refsize = $ref_l;
+	$refc++;
+    }
+
+    if ($refc > 1) {
+    
+	warn("\nWARNING: Reference file has more than one sequence\n");
+    }
+
+    print STDERR "\t\tOrganelle reference size: $refsize bp\n";
+    $gstats{'00_reference_size'} = $refsize;
+}
+
+
+## Optional arguments
+
+my $species = $opt_s || "Species";
+my $sps_abv = "";
+if ($opt_s && $opt_s =~ m/^(..)\w+_(...)\w+/) {
+
+	$sps_abv = "$1"."$2";
+}
+else {
+
+	$sps_abv = "Sps";
+}
+
+print STDERR "\tSpecies name: $species\n";
+
+my $threads = $opt_t || 1;
+if ($opt_t && $opt_t !~ m/^(\d+)$/) {
+
+	die("\nERROR: -t <threads> is not a numberic value.\n");
+}
+
+my %permjavas = (
+	'-Xmx' => 1,
+	'-Xms' => 1
+);
+
+my $javarun = "";
+if ($opt_j) {
+	my @javarun_opts = split(/\s+/, $opt_j);
+	foreach my $java (@javarun_opts) {
+
+		$java =~ s/\d+.+^//;
+		unless ($permjavas{$java}) {
+
+			die("ERROR: Java option $java is not permited. Only -Xmx and/or -Xms are permited.\n"); 
+		}
+	} 
+	$javarun = join(" ", @javarun_opts); 
+}
+
+## Check the executables
+
+my %exec_list = (
+    HISAT2_PATH     => ['hisat2-build', 'hisat2'],
+    SAMTOOLS_PATH   => ['samtools'],
+    FREEBAYES_PATH  => ['freebayes'],
+    BGZIP2_PATH     => ['bgzip'],
+    TABIX_PATH      => ['tabix'],
+    BCFTOOLS_PATH   => ['bcftools'],
+    BEDTOOLS_PATH   => ['bedtools']
+    ); 
+
+my %exepath = ();
+
+foreach my $exec_key (sort keys %exec_list) {
+
+    my @execitems = @{$exec_list{$exec_key}};
+    foreach my $e_item (@execitems) {
+
+	if (exists $ENV{$exec_key}) {
+    
+	    print STDERR "\t$exec_key PATH defined for $e_item executable\n";
+	    $exepath{$e_item} = File::Spec->catfile($ENV{$exec_key}, $e_item);
+	}
+	else {
+    
+	    my $exe_path = can_run($e_item);
+	    if ($exe_path) {
+		
+		$exepath{$e_item} = $exe_path;
+		print STDERR "\t$e_item is available in the PATH ($exe_path)\n";
+	    }
+	    else {
+		
+		print STDERR "\nERROR: $e_item executable ($exec_key package)";
+		die(" is not accessible.\n");
+	    }	   
+	}	
+    }
+}
+
+## Check that bedtools version is v2.20.0 or superior
+my $checkbedv_cmd = "bedtools --version";
+my @checkbedv01run = run( command => $checkbedv_cmd, verbose => $opt_V );
+my $bedversion = $checkbedv01run[3]->[0];
+$bedversion =~ s/bedtools v//;
+my @bedversion = split(/\./, $bedversion);
+
+my $lowerbedversion = 0;
+if ($bedversion[0] < 2) {
+
+    $lowerbedversion = 1;
+}
+elsif ($bedversion[1] < 20) {
+
+    $lowerbedversion = 1;
+}
+
+if ($lowerbedversion == 1) {
+    die("\nERROR: Please use Bedtools version 2.20.0 or above.\n");
+}
+
+## It also needs to check that Pilon can be run
+## Because Pilon is not an executable per se but 
+## a jar file it will be specified as PILON_RUN
+
+if (!$ENV{PILON_RUN}) {
+
+	die("\nERROR: PILON_RUN enviromental variable has not been set.\n"); 
+}
+else {
+
+	my @pilonexe = ("java");
+	if ($javarun) {
+		push(@pilonexe, $javarun);
+	}
+	push(@pilonexe, "-jar");
+	push(@pilonexe, $ENV{PILON_RUN});
+	my $pilonexe = join(" ", @pilonexe);
+
+	my $pilonexe_path = can_run(@pilonexe);
+	if ($pilonexe_path) {
+
+	    $exepath{'pilon'} = \@pilonexe;
+    	    print STDERR "\tPilon is available in the PATH ($pilonexe)\n";
+	}
+	else {
+            print STDERR "\nERROR: Pilon executable (@pilonexe)";
+            die(" is not accessible.\n");
+	}
+}
+
+## Finally it will check if the SRA directory is set up 
+## to later on clean the cache
+
+if ($opt_a) {
+
+	if (!$ENV{SRA_CACHEDIR}) {
+
+		print STDERR "\n\n\tWarning: SRA_CACHEDIR Env. variable is not set up.\n";
+		print STDERR "\tThe script will not clean the cache of the SRA files downloaded";
+		print STDERR " by Hisat2.\n";
+	}
+}
+
+
+
+##############################################################################
+## Mapping step
+##############################################################################
+
+print_header("1) Running Mapping Tools");
+
+print STDERR "\t1.1- Creating the reference index.\n";
+
+
+my @cmd00_faidx = ($exepath{'samtools'}, "faidx", $orgref);
+my $cmd00_faidx = join(" ", @cmd00_faidx);
+my @cmd00run = run( command => $cmd00_faidx, verbose => $opt_V );
+if (!$cmd00run[0]) {
+
+        die("\n\t\tERROR: $cmd00_faidx run with the error:\n\t$cmd00run[2]->[0]\n");
+}
+my $orgref_idx = $orgref . ".fai";
+
+my $refdir = File::Spec->catfile($outdir, "00_ReferenceFiles");
+mkdir($refdir) unless (-d $refdir);
+
+my $idxbasename = basename($orgref, ".fasta", ".fa");
+my $idxout = File::Spec->catfile($refdir, $idxbasename);
+
+my @cmd01_hisat2build = ($exepath{'hisat2-build'}, $orgref, $idxout);
+my $cmd01_hisat2build = join(" ", @cmd01_hisat2build); 
+my @cmd01run = run( command => $cmd01_hisat2build, verbose => $opt_V );
+if (!$cmd01run[0]) {
+
+	die("\n\t\tERROR: $cmd01_hisat2build run with the error:\n\t$cmd01run[2]->[0]\n");
+}
+
+
+print STDERR "\n\t\tHisat2 indexes created at $refdir\n\n";
+
+print STDERR "\t1.2- Running the read mapping.\n";
+
+my $map01dir = File::Spec->catfile($outdir, "01_PrimaryMapFiles");
+mkdir($map01dir) unless (-d $map01dir);
+
+my @primarybamfiles = ();
+foreach my $input (@input_list) {
+
+	my @cmd02_hisat2 = ($exepath{'hisat2'});
+	if ($threads =~ m/^\d+$/) {
+
+		push(@cmd02_hisat2, "--threads", $threads); 
+	}
+	push(@cmd02_hisat2, "-x", $idxout); 
+
+	my $outbasename = "";
+	if ($input_type eq "FASTQ") {
+
+		if ($input =~ m/\{(.+)\}\{(.+)\}/) {
+
+			push(@cmd02_hisat2, "-1", $1, "-2", $2);
+			my $preoutbasename = basename($1, ".fastq", ".fq", ".fasta", ".fa");
+			$preoutbasename =~ s/_1$//;
+			$preoutbasename =~ s/_R1$//;
+			$preoutbasename =~ s/_F$//;
+			$outbasename = $preoutbasename . ".bam";
+		}
+		else {
+
+			push(@cmd02_hisat2, "-U", $input);
+			$outbasename = basename($input, ".fastq", ".fq", ".fasta", ".fa") . ".bam";
+		}
+	}
+	else {
+
+		push(@cmd02_hisat2, "--sra-acc", $input);
+		$outbasename = $input . ".bam"; 
+	}
+	
+	## Now add the pipe to samtools and the outfilename
+	my $outbamfile = File::Spec->catfile($map01dir, $outbasename);
+	push(@cmd02_hisat2, "|", $exepath{"samtools"}, "view", "-F4", "-Sb", "-o", $outbamfile, "-");
+
+	print STDERR "\n\t\tMapping input $input\n";
+
+	my $cmd02_hisat2 = join(" ", @cmd02_hisat2);
+	my @cmd02run = run( command => $cmd02_hisat2, verbose => $opt_V );
+	if (!$cmd02run[0]) {
+
+        	die("\n\t\tERROR: $cmd02_hisat2 run with the error:\n\t$cmd02run[2]->[0]\n");
+	}
+
+	## The file should be sorted
+	my @cmd03_samtoolssort = ($exepath{'samtools'}, "sort", "-@", $threads, "-o", $outbamfile, $outbamfile);
+	my $cmd03_samtoolssort = join(" ", @cmd03_samtoolssort);
+	my @cmd03run = run( command => $cmd03_samtoolssort, verbose => $opt_V );
+	if (!$cmd03run[0]) {
+
+        	die("\n\t\tERROR: $cmd03_samtoolssort run with the error:\n\t$cmd03run[2]->[0]\n");
+	}
+
+	## Add the bamfiles to the primary bam files
+	push(@primarybamfiles, $outbamfile); 
+
+	## Get some stats from the bam file
+	my @cmd04_samtoolsstats = ($exepath{'samtools'}, "stats", "-@", $threads, "-r", $orgref, $outbamfile);
+
+	## Name the out stats file
+	my $outstatsfile = $outbamfile;
+	$outstatsfile .= "stats.txt";
+	push(@cmd04_samtoolsstats, ">", $outstatsfile);
+
+        my $cmd04_samtoolsstats = join(" ", @cmd04_samtoolsstats);
+        my @cmd04run = run( command => $cmd04_samtoolsstats, verbose => $opt_V );
+        if (!$cmd04run[0]) {
+
+                die("\n\t\tERROR: $cmd04_samtoolsstats run with the error:\n\t$cmd04run[2]->[0]\n");
+        }
+
+	## Get some values to print them as message
+	my $readmapped = `grep "reads mapped:" $outstatsfile`;
+	chomp($readmapped);
+	$readmapped =~ s/.+:\s+//;
+	print STDERR "\n\t\t$readmapped reads have been mapped for $input\n";
+	my $basesmapped = `grep "bases mapped (cigar):" $outstatsfile`;
+        chomp($basesmapped);
+        $basesmapped =~ s/.+:\s+//;
+	$basesmapped =~ s/\s+#.+//;
+        print STDERR "\n\t\t$basesmapped bases have been mapped for $input\n";
+	my $averagecov = Math::BigFloat->new($basesmapped / $refsize)->bstr();
+	print STDERR "\n\t\t$averagecov X coverage have been mapped for $input\n";
+
+}
+
+my $pbam_n = scalar(@primarybamfiles);
+my $mergedbam = $sps_abv ."_ReadsMapped2CHL.bam";
+if ($pbam_n > 1) {
+
+	print STDERR "\n\t\tSeveral BAM files have been produced. Merging BAMs.\n";
+	my @cmd05_samtoolsmerge = ($exepath{'samtools'}, "merge", "-@", $threads, $mergedbam, @primarybamfiles);
+        my $cmd05_samtoolsmerge = join(" ", @cmd05_samtoolsmerge);
+        my @cmd05run = run( command => $cmd05_samtoolsmerge, verbose => $opt_V );
+        if (!$cmd05run[0]) {
+
+                die("\n\t\tERROR: $cmd05_samtoolsmerge run with the error:\n\t$cmd05run[2]->[0]\n");
+        }
+}
+else {
+	$mergedbam = $primarybamfiles[0];
+}
+
+##############################################################################
+## Coverage step
+##############################################################################
+
+print_header("2) Estimating Mapping Coverage");
+
+my $cov02dir = File::Spec->catfile($outdir, "02_PrimaryCoverageFiles");
+mkdir($cov02dir) unless (-d $cov02dir);
+
+print STDERR "\n\t2.1- Running Bedtools to get the coverage\n";
+
+my @cmd06_bedtcov = ($exepath{'bedtools'}, "genomecov", "-bga", "-ibam", $mergedbam, "-g", $orgref_idx);
+
+## Coverage bed output
+my $covbasename = basename($mergedbam, ".bam") . ".cov.bed";
+my $covfile = File::Spec->catfile($cov02dir, $covbasename);
+push(@cmd06_bedtcov, ">", $covfile); 
+
+my $cmd06_bedtcov = join(" ", @cmd06_bedtcov);
+
+my @cmd06run = run( command => $cmd06_bedtcov, verbose => $opt_V );
+if (!$cmd06run[0]) {
+
+	die("\n\t\tERROR: $cmd06_bedtcov run with the error:\n\t$cmd06run[2]->[0]\n");
+}
+
+## Filter covbed for 0 coverage
+
+print STDERR "\n\t2.2- Extracting 0 coverage regions\n";
+my @cmd07_filterbed = ("grep", "-w", '0$', $covfile, "|", "cut", "-f1,2,3");
+
+## Coverage bed output
+my $cov0basename = basename($mergedbam, ".bam") . ".cov0regions.bed";
+my $cov0file = File::Spec->catfile($cov02dir, $cov0basename);
+push(@cmd07_filterbed, ">", $cov0file);
+
+my $cmd07_filterbed = join(" ", @cmd07_filterbed);
+
+my @cmd07run = run( command => $cmd07_filterbed, verbose => $opt_V );
+if (!$cmd07run[0]) {
+
+        die("\n\t\tERROR: $cmd07_filterbed run with the error:\n\t$cmd07run[2]->[0]\n");
+}
+
+my $regions0cov = 0;
+my $size0cov = 0;
+open my $c0fh, '<', $cov0file;
+while(<$c0fh>) {
+
+	chomp($_);
+	my @line = split(/\s+/, $_);
+	$regions0cov++;
+	my $gapsize = $line[2] - $line[1];
+	$size0cov += $gapsize;
+}
+close($c0fh);
+print STDERR "\n\t\t$regions0cov regions ($size0cov bp total) of 0 coverage has been detected.\n";
+
+
+##############################################################################
+## Variant and Consensus calling step
+##############################################################################
+
+print_header("3) Variant and Consensus Call");
+
+my $cons03dir = File::Spec->catfile($outdir, "03_VariantConsensus");
+mkdir($cons03dir) unless (-d $cons03dir);
+
+print STDERR "\n\t3.1- Running FreeBayes to call variants\n";
+
+my $variantfile = File::Spec->catfile($cons03dir, basename($mergedbam, ".bam"));
+my @cmd08_fbayes = ($exepath{'freebayes'}, "-f", $orgref, "-b", $mergedbam, "-v", $variantfile);
+my $cmd08_fbayes = join(" ", @cmd08_fbayes);
+
+my @cmd08run = run( command => $cmd08_fbayes, verbose => $opt_V );
+if (!$cmd08run[0]) {
+
+        die("\n\t\tERROR: $cmd08_fbayes run with the error:\n\t$cmd08run[2]->[0]\n");
+}
+
+## Once FreeBayes has run, it would be great to get a summary of the variants
+
+my %vcfstats = ();
+
+open my $vcffh, '<', $variantfile;
+while(<$vcffh>) {
+
+	chomp($_);
+	if ($_ !~ m/#/) {
+		
+		my @line = split(/\t/, $_);
+		my %tagfield = ();
+		foreach my $tagpair (split(/;/, $line[7])){
+	
+			if ($tagpair =~ m/^(.+)=(.+)$/) {
+			
+				$tagfield{$1} = $2;
+			}
+		}
+		if (exists $vcfstats{$tagfield{'TYPE'}}) {
+
+			$vcfstats{$tagfield{'TYPE'}}++;
+		}
+		else {
+
+			$vcfstats{$tagfield{'TYPE'}} = 1;
+		}
+	} 
+}
+close($vcffh);
+
+print STDERR "\n\t\t\tSummary variant calling:\n";
+foreach my $vtype (sort {$vcfstats{$b} <=> $vcfstats{$a}} keys %vcfstats) {
+
+	print STDERR "\t\t\t\t$vtype\t$vcfstats{$vtype}\n";
+}
+
+## Now it will compress and create the index before call the consensus
+
+print STDERR "\n\t3.2- Compressing and indexing variant file\n";
+my @cmd09_bgzip = ($exepath{'bgzip'}, "-c", $variantfile, ">", $variantfile . ".gz");
+my $cmd09_bgzip = join(" ", @cmd09_bgzip);
+
+my @cmd09run = run( command => $cmd09_bgzip, verbose => $opt_V );
+if (!$cmd09run[0]) {
+
+        die("\n\t\tERROR: $cmd09_bgzip run with the error:\n\t$cmd09run[2]->[0]\n");
+}
+
+my @cmd10_tabix = ($exepath{'tabix'}, $variantfile . ".gz");
+my $cmd10_tabix = join(" ", @cmd10_tabix);
+
+my @cmd10run = run( command => $cmd10_tabix, verbose => $opt_V );
+if (!$cmd10run[0]) {
+
+        die("\n\t\tERROR: $cmd10_tabix run with the error:\n\t$cmd10run[2]->[0]\n");
+}
+
+## Now it will call the consensus
+print STDERR "\n\t3.3- Consensus calling with Bcftools\n";
+
+my $consfile = File::Spec->catfile($cons03dir, $species . "_CHL.consensus.fasta");
+my @cmd11_cons = ("cat", $orgref, "|", $exepath{'bcftools'}, "consensus", "-m", $cov0file, $variantfile . ".gz");
+push (@cmd11_cons, "|", "sed", "-r", "\'"."s/>.+/>".$sps_abv."/"."\'", ">", $consfile);
+my $cmd11_cons = join(" ", @cmd11_cons);
+
+my @cmd11run = run( command => $cmd11_cons, verbose => $opt_V );
+if (!$cmd11run[0]) {
+
+        die("\n\t\tERROR: $cmd11_cons run with the error:\n\t$cmd11run[2]->[0]\n");
+}
+
+##############################################################################
+## Polishing step
+##############################################################################
+
+print_header("4) Polishing");
+
+print STDERR "\t4.1- Creating the consensus reference Hisat2 indexes.\n";
+
+my $poldir = File::Spec->catfile($outdir, "04_Polishing");
+mkdir($poldir) unless (-d $poldir);
+
+my $idxbase_cons = basename($consfile, ".fasta", ".fa");
+my $idxout_cons = File::Spec->catfile($poldir, $idxbase_cons);
+
+my @cmd12_hisat2build = ($exepath{'hisat2-build'}, $consfile, $idxout_cons);
+my $cmd12_hisat2build = join(" ", @cmd12_hisat2build);
+my @cmd12run = run( command => $cmd12_hisat2build, verbose => $opt_V );
+if (!$cmd12run[0]) {
+
+        die("\n\t\tERROR: $cmd12_hisat2build run with the error:\n\t$cmd12run[2]->[0]\n");
+}
+
+print STDERR "\n\t\tHisat2 indexes created at $poldir\n\n";
+
+print STDERR "\t4.2- Running the read re-mapping.\n";
+
+my @secondarybamfiles = ();
+foreach my $input (@input_list) {
+
+        my @cmd13_hisat2 = ($exepath{'hisat2'});
+        if ($threads =~ m/^\d+$/) {
+
+                push(@cmd13_hisat2, "--threads", $threads);
+        }
+        push(@cmd13_hisat2, "-x", $idxout_cons);
+
+        my $outbasename = "";
+        if ($input_type eq "FASTQ") {
+
+                if ($input =~ m/\{(.+)\}\{(.+)\}/) {
+
+                        push(@cmd13_hisat2, "-1", $1, "-2", $2);
+                        my $preoutbasename = basename($1, ".fastq", ".fq", ".fasta", ".fa");
+                        $preoutbasename =~ s/_1$//;
+                        $preoutbasename =~ s/_R1$//;
+                        $preoutbasename =~ s/_F$//;
+                        $outbasename = $preoutbasename . ".bam";
+                }
+                else {
+
+                        push(@cmd13_hisat2, "-U", $input);
+                        $outbasename = basename($input, ".fastq", ".fq", ".fasta", ".fa") . ".bam";
+                }
+        }
+        else {
+
+                push(@cmd13_hisat2, "--sra-acc", $input);
+                $outbasename = $input . ".bam";
+        }
+
+        ## Now add the pipe to samtools and the outfilename
+        my $outbamfile = File::Spec->catfile($poldir, $outbasename);
+        push(@cmd13_hisat2, "|", $exepath{"samtools"}, "view", "-F4", "-Sb", "-o", $outbamfile, "-");
+
+        print STDERR "\n\t\tMapping input $input\n\n";
+
+        my $cmd13_hisat2 = join(" ", @cmd13_hisat2);
+        my @cmd13run = run( command => $cmd13_hisat2, verbose => $opt_V );
+        if (!$cmd13run[0]) {
+
+                die("\n\t\tERROR: $cmd13_hisat2 run with the error:\n\t$cmd13run[2]->[0]\n");
+        }
+
+        ## The file should be sorted
+        my @cmd14_samtoolssort = ($exepath{'samtools'}, "sort", "-@", $threads, "-o", $outbamfile, $outbamfile);
+        my $cmd14_samtoolssort = join(" ", @cmd14_samtoolssort);
+        my @cmd14run = run( command => $cmd14_samtoolssort, verbose => $opt_V );
+        if (!$cmd14run[0]) {
+
+
+                die("\n\t\tERROR: $cmd14_samtoolssort run with the error:\n\t$cmd14run[2]->[0]\n");
+        }
+
+        ## Add the bamfiles to the primary bam files
+        push(@secondarybamfiles, $outbamfile);
+}
+
+my $sbam_n = scalar(@secondarybamfiles);
+my $s_mergedbam = $sps_abv ."_ReadsMapped2consensusCHL.bam";
+if ($sbam_n > 1) {
+
+        print STDERR "\n\t\tSeveral BAM files have been produced. Merging BAMs.\n";
+        my @cmd15_samtoolsmerge = ($exepath{'samtools'}, "merge", "-@", $threads, $s_mergedbam, @secondarybamfiles);
+        my $cmd15_samtoolsmerge = join(" ", @cmd15_samtoolsmerge);
+        my @cmd15run = run( command => $cmd15_samtoolsmerge, verbose => $opt_V );
+        if (!$cmd15run[0]) {
+
+                die("\n\t\tERROR: $cmd15_samtoolsmerge run with the error:\n\t$cmd15run[2]->[0]\n");
+        }
+}
+else {
+        $s_mergedbam = $secondarybamfiles[0];
+}
+
+## It will need also to index the file
+my @cmd16_samtoolsidx = ($exepath{'samtools'}, "index", $s_mergedbam);
+my $cmd16_samtoolsidx = join(" ", @cmd16_samtoolsidx);
+my @cmd16run = run( command => $cmd16_samtoolsidx, verbose => $opt_V );
+if (!$cmd16run[0]) {
+
+        die("\n\t\tERROR: $cmd16_samtoolsidx run with the error:\n\t$cmd16run[2]->[0]\n");
+}
+
+
+print STDERR "\t4.3- Pilon polishing.\n";
+my @cmd17_pilon = ("java", $javarun, "-jar", $ENV{PILON_RUN}, "--genome", $consfile, "--bam", $s_mergedbam);
+
+my $foutname = File::Spec->catfile($poldir, $species . "_CHL_final.fasta");
+push(@cmd17_pilon, "--output", $foutname);
+push(@cmd17_pilon, "--threads", $threads); 
+
+my $cmd17_pilon = join(" ", @cmd17_pilon);
+my @cmd17run = run( command => $cmd17_pilon, verbose => $opt_V );
+if (!$cmd17run[0]) {
+
+        die("\n\t\tERROR: $cmd17_pilon run with the error:\n\t$cmd17run[2]->[0]\n");
+}
+
+print STDERR "\n\n\t\tChloroplast final outfile: $foutname\n";
+
+
+##############################################################################
+## Cleaning step
+##############################################################################
+
+print_header("5) Cleaning");
+
+if ($ENV{"SRA_CACHEDIR"}) {
+
+	if ($input_type eq "SRA") {
+
+		print STDERR "\n\t\tCleaning step activated. Deleting SRA files.\n";
+
+		foreach my $input (@input_list) {
+
+			## Clean the cache if the reads have been downloaded
+
+                        my $cachefile = File::Spec->catfile($ENV{"SRA_CACHEDIR"}, $input);
+                        $cachefile .= ".sra";
+                        if (-e $cachefile) {
+
+                                unlink($cachefile);
+                                print STDERR "\n\t\tSRA cache file: $cachefile has been removed.\n";
+                        }
+			else {
+
+				print STDERR "\n\t\t$cachefile file does not exist. Ignoring deleting.\n";
+			}
+                }
+        }
+	else {
+
+		print STDERR "\n\t\tInput is not SRA. Ignoring cleaning SRA files.\n";
+	}
+}
+else {
+
+	print STDERR "\n\t\tNo SRA_CACHEDIR was specified. Ignoring cleaning.\n";
+}
+
+
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## OrganelleSRABuild Ends ($date)   ##\n";
+print STDERR "############################################################\n\n";
+exit;
+
+
+##############################################################################
+##############################################################################
+##
+## FUNCTIONS
+##
+###############################################################################
+## function to print the script help
+###############################################################################
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    OrganelleSRABuild
+      
+
+    Usage:
+
+
+    Description:
+      
+ 
+    Flags:
+
+
+
+EOF
+exit (1);
+}
+
+
+##############################################################################
+## Just a simple function to print a message with some format
+##############################################################################
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
