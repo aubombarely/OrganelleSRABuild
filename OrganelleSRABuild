@@ -665,7 +665,8 @@ mkdir($cons03dir) unless (-d $cons03dir);
 
 print STDERR "\n\t3.1- Running FreeBayes to call variants\n";
 
-my $variantfile = File::Spec->catfile($cons03dir, basename($mergedbam, ".bam"));
+my $variantfile = File::Spec->catfile($cons03dir, basename($mergedbam, ".bam")).".vcf";
+
 my @cmd08_fbayes = ($exepath{'freebayes'}, "-f", $orgref, "-b", $mergedbam, "-v", $variantfile);
 my $cmd08_fbayes = join(" ", @cmd08_fbayes);
 
