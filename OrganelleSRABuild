@@ -969,7 +969,15 @@ if ($ENV{"SRA_CACHEDIR"}) {
                         }
 			else {
 
-				print STDERR "\n\t\t$cachefile file does not exist. Ignoring deleting.\n";
+				$cachefile .= ".cache";
+				if (-e $cachefile) {
+
+					unlink($cachefile);
+                	                print STDERR "\n\t\tSRA cache file: $cachefile has been removed.\n";
+				}
+				else {
+					print STDERR "\n\t\t$cachefile file does not exist. Ignoring deleting.\n";
+				}
 			}
                 }
         }
