@@ -66,13 +66,60 @@ B<help>                  print the help
 
 =head1 DESCRIPTION
 
- This program produces a reference based organelle assembly based in a Hisat2
- mapping to a conserved reference.
+ This program produces a reference based organelle assembly
+ based in a Hisat2 mapping to a conserved reference.
 
  The program accepts two types of inputs:
-  * Fastq files (-i) separated by commas. Pair end files can be specified between 
-    curly brackets, no commas (e.g. {File1_R1}{File1_R2},{File2_R1}{File2_R2}.
+  * Fastq files (-i) separated by commas. Pair end files 
+    can be specified between curly brackets, no commas 
+    (e.g. {File1_R1}{File1_R2},{File2_R1}{File2_R2}).
   * SRA accessions (-a) separated by commas. 
+
+ OrganelleSRABuild will run the following steps:
+  1.1- Generation of the Hisat2 indexes for the reference.
+  1.2- Running the read mapping. If an SRA accession is 
+       supplied, Hisat2 will download the SRA files.
+  2.1- Analysis of the mapping coverage.
+  2.2- Filtering of the 0 coverage regions. During the 
+       consensus call these regions will be masked with Ns
+  3.1- Variant calling and summary.
+  3.2- Compresing and indexing of the variant file.
+  3.3- Consensus call with BcfTools.
+  4.1- Indexing of the consensus.
+  4.2- Read remapping to the consensus.
+  4.3- Polishing with Pilon.
+
+ OrganelleSRABuils uses different tools. Before the tool 
+ runs the steps specified before, it will check that all 
+ the binaries and scripts are available. They can be 
+ available by two different methods: 1- They can be in the 
+ PATH;2- You can specify a envirmental variable that points
+ the tool to find the binaries. For example, if hisat2 is 
+ not in the PATH, you could use HISAT2_PATH to indicate 
+ OrganelleSRABuild where it can find hisat2-build and 
+ hisat2. The available executable paths are: HISAT2_PATH, 
+ SAMTOOLS_PATH, FREEBAYES_PATH, BGZIP2_PATH, TABIX_PATH, 
+ BCFTOOLS_PATH and BEDTOOLS_PATH. To set up the variable:
+
+  "export HISAT2_PATH=/home/software/hisat2_installation"
+
+ A mandatory enviromental variable is PILON_RUN and it
+ species where the pilon.jar file can be found.
+
+ An optional enviromental variable is SRA_CACHEDIR and 
+ specifies where the SRA files downloaded by hisat2 can
+ be found. If this enviromental variable is active, the
+ program assumes that the cache files have to be deleted
+ after the run.
+
+ Example of run:
+  "OrganelleSRABuild -a SRR7692020 -o Nihet -r NibenCHL.fa"
+
+ The program can run verbose with the option -V is used.
+
+ The sequenceID and the names of the final files can be
+ determined using the -s <species_name> option. The program
+ will replace any space by "_".
 
 =cut
 
@@ -100,9 +147,6 @@ use File::Basename;
 use File::Copy;
 use File::Path qw(make_path remove_tree);
 use IPC::Cmd qw[can_run run];
-
-use Bio::SeqIO;
-use Bio::Tools::Run::StandAloneBlastPlus;
 
 use Math::BigFloat;
 
@@ -198,13 +242,18 @@ else {
 
     my $refc = 0;
 
-    my $ref_seqio = Bio::SeqIO->new( -file => $orgref, -type => 'fasta' );
-    while( my $refseq = $ref_seqio->next_seq() ) {
+    open my $ref_seqio, "<", $orgref;
+    while(<$ref_seqio>) {
     
-	my $refid = $refseq->id();
-	my $ref_l = $refseq->length();
-	$refsize = $ref_l;
-	$refc++;
+	chomp($_);
+	if ($_ =~ m/^>/) {
+	
+		$refc++;
+	}
+	else {
+
+		$refsize += length($_);
+    	}
     }
 
     if ($refc > 1) {
@@ -221,9 +270,13 @@ else {
 
 my $species = $opt_s || "Species";
 my $sps_abv = "";
-if ($opt_s && $opt_s =~ m/^(..)\w+_(...)\w+/) {
+if ($opt_s) {
 
-	$sps_abv = "$1"."$2";
+	$opt_s =~ s/\s+/_/g;
+	if ($opt_s =~ m/^(..)_(...)/) {
+
+		$sps_abv = "$1"."$2";
+	}
 }
 else {
 
@@ -488,7 +541,7 @@ foreach my $input (@input_list) {
         $basesmapped =~ s/.+:\s+//;
 	$basesmapped =~ s/\s+#.+//;
         print STDERR "\n\t\t$basesmapped bases have been mapped for $input\n";
-	my $averagecov = Math::BigFloat->new($basesmapped / $refsize)->bstr();
+	my $averagecov = Math::BigFloat->new($basesmapped / $refsize)->ffround(-2)->bstr();
 	print STDERR "\n\t\t$averagecov X coverage have been mapped for $input\n";
 
 }
@@ -535,6 +588,37 @@ if (!$cmd06run[0]) {
 
 	die("\n\t\tERROR: $cmd06_bedtcov run with the error:\n\t$cmd06run[2]->[0]\n");
 }
+
+my $max_cov = 0;
+my $min_cov = 1000000000000;
+my $length_cov = 0;
+my $tsize = 0;
+
+open my $covfh, "<", $covfile;
+while(<$covfh>) {
+
+	chomp($_);
+	my @line = split(/\t/, $_);
+	my $region = $line[2] - $line[1];
+	$length_cov += $region;
+	$tsize += $region * $line[3];
+
+	if ($line[3] <= $min_cov) {
+
+		$min_cov = $line[3];
+	}
+	if ($line[3] >= $max_cov) {
+
+		$max_cov = $line[3];
+	}
+}
+close($covfh);
+
+my $ave_cov = Math::BigFloat->new($tsize / $length_cov)->ffround(-2)->bstr();
+print STDERR "\n\t\tMinimum coverage = $min_cov X";
+print STDERR "\n\t\tMaximum coverage = $max_cov X";
+print STDERR "\n\t\tAverage coverage = $ave_cov X\n";
+
 
 ## Filter covbed for 0 coverage
 
@@ -662,6 +746,39 @@ if (!$cmd11run[0]) {
         die("\n\t\tERROR: $cmd11_cons run with the error:\n\t$cmd11run[2]->[0]\n");
 }
 
+my $conslength = 0;
+my %comp = ();
+
+open my $consfh, '<', $consfile;
+while(<$consfh>){
+
+	chomp($_);
+	if ($_ !~ m/^>/) {
+
+		$conslength += length($_);
+		foreach my $char (split(//, $_)) {
+		
+			if (exists $comp{$char}) {
+
+				$comp{$char}++;
+			}
+			else {
+			
+				$comp{$char} = 1;
+			}		
+		}
+	}
+}
+close($consfh);
+
+print STDERR "\n\t\tConsensus sequence total size: $conslength bp";
+print STDERR "\n\t\tConsensus sequence composition:\n";
+foreach my $base (sort {$a cmp $b} keys %comp) {
+
+	print STDERR "\t\t\t$base:\t$comp{$base} bases\n";
+}
+
+
 ##############################################################################
 ## Polishing step
 ##############################################################################
@@ -779,8 +896,9 @@ if (!$cmd16run[0]) {
 print STDERR "\t4.3- Pilon polishing.\n";
 my @cmd17_pilon = ("java", $javarun, "-jar", $ENV{PILON_RUN}, "--genome", $consfile, "--bam", $s_mergedbam);
 
-my $foutname = File::Spec->catfile($poldir, $species . "_CHL_final.fasta");
-push(@cmd17_pilon, "--output", $foutname);
+my $foutbase = File::Spec->catfile($poldir, $species . "_CHL_final");
+my $foutname = $foutbase . ".fasta";
+push(@cmd17_pilon, "--output", $foutbase);
 push(@cmd17_pilon, "--threads", $threads); 
 
 my $cmd17_pilon = join(" ", @cmd17_pilon);
@@ -790,7 +908,39 @@ if (!$cmd17run[0]) {
         die("\n\t\tERROR: $cmd17_pilon run with the error:\n\t$cmd17run[2]->[0]\n");
 }
 
-print STDERR "\n\n\t\tChloroplast final outfile: $foutname\n";
+print STDERR "\n\t\tChloroplast final outfile: $foutname\n";
+
+my $finallength = 0;
+my %fcomp = ();
+
+open my $finalfh, '<', $foutname;
+while(<$finalfh>){
+
+        chomp($_);
+        if ($_ !~ m/^>/) {
+
+                $finallength += length($_);
+                foreach my $char (split(//, $_)) {
+
+                        if (exists $fcomp{$char}) {
+
+                                $fcomp{$char}++;
+                        }
+                        else {
+
+                                $fcomp{$char} = 1;
+                        }
+                }
+        }
+}
+close($finalfh);
+
+print STDERR "\n\t\tFinal sequence total size: $finallength bp";
+print STDERR "\n\t\tFinal sequence composition:\n";
+foreach my $base (sort {$a cmp $b} keys %fcomp) {
+
+        print STDERR "\t\t\t$base:\t$fcomp{$base} bases\n";
+}
 
 
 ##############################################################################
@@ -854,15 +1004,82 @@ sub help {
   $0:
 
     OrganelleSRABuild
-      
+     A pipeline to produce reference-based plastid genome 
+     assemblies from Illumina reads     
 
     Usage:
-
-
-    Description:
-      
+     OrganelleSRABuild -i <input_fastq>|-a <sra_accession>
+                       -r <fasta_reference> -o <output_dir>
+                       [-s <species_name>] [-t <threads>] 
+                       [-j <java_run_arguments>]
+                       [-V] [-h]
  
+    Description:
+     This program produces a reference based organelle assembly
+     based in a Hisat2 mapping to a conserved reference.
+
+     The program accepts two types of inputs:
+      * Fastq files (-i) separated by commas. Pair end files
+        can be specified between curly brackets, no commas
+        (e.g. {File1_R1}{File1_R2},{File2_R1}{File2_R2}).
+      * SRA accessions (-a) separated by commas.
+
+     OrganelleSRABuild will run the following steps:
+      1.1- Generation of the Hisat2 indexes for the reference.
+      1.2- Running the read mapping. If an SRA accession is
+           supplied, Hisat2 will download the SRA files.
+      2.1- Analysis of the mapping coverage.
+      2.2- Filtering of the 0 coverage regions. During the
+           consensus call these regions will be masked with Ns
+      3.1- Variant calling and summary.
+      3.2- Compresing and indexing of the variant file.
+      3.3- Consensus call with BcfTools.
+      4.1- Indexing of the consensus.
+      4.2- Read remapping to the consensus.
+      4.3- Polishing with Pilon.
+
+     OrganelleSRABuils uses different tools. Before the tool
+     runs the steps specified before, it will check that all
+     the binaries and scripts are available. They can be
+     available by two different methods: 1- They can be in the
+     PATH;2- You can specify a envirmental variable that points
+     the tool to find the binaries. For example, if hisat2 is
+     not in the PATH, you could use HISAT2_PATH to indicate
+     OrganelleSRABuild where it can find hisat2-build and
+     hisat2. The available executable paths are: HISAT2_PATH,
+     SAMTOOLS_PATH, FREEBAYES_PATH, BGZIP2_PATH, TABIX_PATH,
+     BCFTOOLS_PATH and BEDTOOLS_PATH. To set up the variable:
+      
+     "export HISAT2_PATH=/home/software/hisat2_installation"
+
+     A mandatory enviromental variable is PILON_RUN and it
+     species where the pilon.jar file can be found.
+
+     An optional enviromental variable is SRA_CACHEDIR and
+     specifies where the SRA files downloaded by hisat2 can
+     be found. If this enviromental variable is active, the
+     program assumes that the cache files have to be deleted
+     after the run.
+
+     Example of run:
+         
+     "OrganelleSRABuild -a SRR7692020 -o Nihet -r NibenCHL.fa"
+
+     The program can run verbose with the option -V is used.
+
     Flags:
+      -i  input_fastq           input short reads dataset(s) with FASTQ format. 
+                                Comma separated. (Co-mandatory with -a)
+      -a  sra_accession         input SRA accession(s) ID. 
+                                Comma separated. (Co-mandatory with -i)
+      -r  fasta_reference       organelle reference genome, fasta format (mandatory)
+      -o  output_dir            output directory (mandatory)
+      -s  species_name          species name (optional - default "Species" and "sps")
+      -t  number_of_threads     number of threads (optional - default 1)
+      -j  java_run_arguments    arguments for the Java run for pilon (e.g. "-Xmx8G" - default none)
+      -V  be_verbose            be verbose and print the parsing status.
+      -v  version               print version
+      -h  help                  print the help
 
 
 
