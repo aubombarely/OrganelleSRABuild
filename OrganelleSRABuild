@@ -311,6 +311,7 @@ if ($opt_j) {
 }
 
 ## Check the executables
+print STDERR "\n\n\t** CHECKING EXECUTABLES AND PATHS **\n";
 
 my %exec_list = (
     HISAT2_PATH     => ['hisat2-build', 'hisat2'],
@@ -535,14 +536,14 @@ foreach my $input (@input_list) {
 	my $readmapped = `grep "reads mapped:" $outstatsfile`;
 	chomp($readmapped);
 	$readmapped =~ s/.+:\s+//;
-	print STDERR "\n\t\t$readmapped reads have been mapped for $input\n";
+	print STDERR "\n\t\t\t$readmapped reads have been mapped for $input\n";
 	my $basesmapped = `grep "bases mapped (cigar):" $outstatsfile`;
         chomp($basesmapped);
         $basesmapped =~ s/.+:\s+//;
 	$basesmapped =~ s/\s+#.+//;
-        print STDERR "\n\t\t$basesmapped bases have been mapped for $input\n";
+        print STDERR "\n\t\t\t$basesmapped bases have been mapped for $input\n";
 	my $averagecov = Math::BigFloat->new($basesmapped / $refsize)->ffround(-2)->bstr();
-	print STDERR "\n\t\t$averagecov X coverage have been mapped for $input\n";
+	print STDERR "\n\t\t\t$averagecov X coverage have been mapped for $input\n";
 
 }
 
@@ -551,7 +552,7 @@ my $mergedbam = $sps_abv ."_ReadsMapped2CHL.bam";
 if ($pbam_n > 1) {
 
 	print STDERR "\n\t\tSeveral BAM files have been produced. Merging BAMs.\n";
-	my @cmd05_samtoolsmerge = ($exepath{'samtools'}, "merge", "-@", $threads, $mergedbam, @primarybamfiles);
+	my @cmd05_samtoolsmerge = ($exepath{'samtools'}, "merge", "-f", "-@", $threads, $mergedbam, @primarybamfiles);
         my $cmd05_samtoolsmerge = join(" ", @cmd05_samtoolsmerge);
         my @cmd05run = run( command => $cmd05_samtoolsmerge, verbose => $opt_V );
         if (!$cmd05run[0]) {
@@ -871,7 +872,7 @@ my $s_mergedbam = $sps_abv ."_ReadsMapped2consensusCHL.bam";
 if ($sbam_n > 1) {
 
         print STDERR "\n\t\tSeveral BAM files have been produced. Merging BAMs.\n";
-        my @cmd15_samtoolsmerge = ($exepath{'samtools'}, "merge", "-@", $threads, $s_mergedbam, @secondarybamfiles);
+        my @cmd15_samtoolsmerge = ($exepath{'samtools'}, "merge", "-f", "-@", $threads, $s_mergedbam, @secondarybamfiles);
         my $cmd15_samtoolsmerge = join(" ", @cmd15_samtoolsmerge);
         my @cmd15run = run( command => $cmd15_samtoolsmerge, verbose => $opt_V );
         if (!$cmd15run[0]) {
