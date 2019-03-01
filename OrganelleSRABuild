@@ -894,7 +894,7 @@ if (!$cmd16run[0]) {
 }
 
 
-print STDERR "\t4.3- Pilon polishing.\n";
+print STDERR "\n\t4.3- Pilon polishing.\n";
 my @cmd17_pilon = ("java", $javarun, "-jar", $ENV{PILON_RUN}, "--genome", $consfile, "--bam", $s_mergedbam);
 
 my $foutbase = File::Spec->catfile($poldir, $species . "_CHL_final");
