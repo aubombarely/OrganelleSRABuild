@@ -52,3 +52,11 @@ Example 1: Download an SRA file and map with 1 thread
 Example 2: Download 3 SRA files and map with 8 threads
 
 ```OrganelleSRABuild -a SRR7692020,SRR7692023,SRR7451098 -o Nihet -r NibenCHL.fa -t 8```
+
+Example 3: Map a single FASTQ file
+
+```OrganelleSRABuild -a SRR7692020_1.fastq -o Nihet -r NibenCHL.fa```
+
+Example 4: Map a pair end FASTQ file
+
+```OrganelleSRABuild -a {SRR7692020_1.fastq}{SRR7692020_2.fastq} -o Nihet -r NibenCHL.fa```
