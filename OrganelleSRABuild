@@ -1087,7 +1087,8 @@ sub help {
       -o  output_dir            output directory (mandatory)
       -s  species_name          species name (optional - default "Species" and "sps")
       -t  number_of_threads     number of threads (optional - default 1)
-      -j  java_run_arguments    arguments for the Java run for pilon (e.g. "-Xmx8G" - default none)
+      -j  java_run_arguments    arguments for the Java run for pilon 
+                                (e.g. "-Xmx8G" - default none)
       -V  be_verbose            be verbose and print the parsing status.
       -v  version               print version
       -h  help                  print the help
