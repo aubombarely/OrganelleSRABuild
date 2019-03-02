@@ -7,7 +7,7 @@
 
 =cut
 
-our $version = '0.0.1';
+our $version = '0.1.1';
 
 =head1 SYPNOSIS
 
@@ -164,7 +164,7 @@ if ($opt_h) {
 }
 elsif ($opt_v) {
     print STDERR "\nOrganelleSRABuild version:$version\n";
-    print STDERR "Developed at the Bombarely Laboratory (2019-02-25)\n\n";
+    print STDERR "Developed at Bombarely Labs (2019-02-25)\n\n";
     exit(1);
 }
 
@@ -273,7 +273,7 @@ my $sps_abv = "";
 if ($opt_s) {
 
 	$opt_s =~ s/\s+/_/g;
-	if ($opt_s =~ m/^(..)_(...)/) {
+	if ($opt_s =~ m/^(..).+_(...).+/) {
 
 		$sps_abv = "$1"."$2";
 	}
@@ -284,6 +284,7 @@ else {
 }
 
 print STDERR "\tSpecies name: $species\n";
+print STDERR "\tSpecies abreviation: $sps_abv\n";
 
 my $threads = $opt_t || 1;
 if ($opt_t && $opt_t !~ m/^(\d+)$/) {
@@ -548,7 +549,7 @@ foreach my $input (@input_list) {
 }
 
 my $pbam_n = scalar(@primarybamfiles);
-my $mergedbam = $sps_abv ."_ReadsMapped2CHL.bam";
+my $mergedbam = File::Spec->catfile($map01dir, $sps_abv ."_ReadsMapped2CHL.bam");
 if ($pbam_n > 1) {
 
 	print STDERR "\n\t\tSeveral BAM files have been produced. Merging BAMs.\n";
@@ -707,10 +708,10 @@ while(<$vcffh>) {
 }
 close($vcffh);
 
-print STDERR "\n\t\t\tSummary variant calling:\n";
+print STDERR "\n\t\tSummary variant calling:\n";
 foreach my $vtype (sort {$vcfstats{$b} <=> $vcfstats{$a}} keys %vcfstats) {
 
-	print STDERR "\t\t\t\t$vtype\t$vcfstats{$vtype}\n";
+	print STDERR "\t\t\t$vtype\t$vcfstats{$vtype}\n";
 }
 
 ## Now it will compress and create the index before call the consensus
@@ -869,7 +870,7 @@ foreach my $input (@input_list) {
 }
 
 my $sbam_n = scalar(@secondarybamfiles);
-my $s_mergedbam = $sps_abv ."_ReadsMapped2consensusCHL.bam";
+my $s_mergedbam = File::Spec->catfile($poldir, $sps_abv ."_ReadsMapped2consensusCHL.bam");
 if ($sbam_n > 1) {
 
         print STDERR "\n\t\tSeveral BAM files have been produced. Merging BAMs.\n";
