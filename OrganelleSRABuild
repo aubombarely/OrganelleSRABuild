@@ -83,8 +83,9 @@ B<help>                  print the help
   2.2- Filtering of the 0 coverage regions. During the 
        consensus call these regions will be masked with Ns
   3.1- Variant calling and summary.
-  3.2- Compresing and indexing of the variant file.
-  3.3- Consensus call with BcfTools.
+  3.2- Variant filtering getting only homozygous variants
+  3.3- Compresing and indexing of the variant file.
+  3.4- Consensus call with BcfTools.
   4.1- Indexing of the consensus.
   4.2- Read remapping to the consensus.
   4.3- Polishing with Pilon.
@@ -714,10 +715,60 @@ foreach my $vtype (sort {$vcfstats{$b} <=> $vcfstats{$a}} keys %vcfstats) {
 	print STDERR "\t\t\t$vtype\t$vcfstats{$vtype}\n";
 }
 
+## It will filter the variants getting only homozygous variants
+print STDERR "\n\t3.2- Filtering out non-homozygous variants\n";
+
+my $variantfile_filtered = File::Spec->catfile($cons03dir, basename($mergedbam, ".bam")).".filtered.vcf";
+my @cmd09_varfilter = ($exepath{'bcftools'}, "filter -e", "'AF<1'", $variantfile, ">", $variantfile_filtered);
+my $cmd09_varfilter = join(" ", @cmd09_varfilter);
+
+my @cmd09_vf_run = run( command => $cmd09_varfilter, verbose => $opt_V );
+if (!$cmd09_vf_run[0]) {
+
+        die("\n\t\tERROR: $cmd09_varfilter run with the error:\n\t$cmd09_vf_run[2]->[0]\n");
+}
+
+my %vcfstats_f = ();
+
+open my $vcffh_f, '<', $variantfile_filtered;
+while(<$vcffh_f>) {
+
+        chomp($_);
+        if ($_ !~ m/#/) {
+
+                my @line = split(/\t/, $_);
+                my %tagfield = ();
+                foreach my $tagpair (split(/;/, $line[7])){
+
+                        if ($tagpair =~ m/^(.+)=(.+)$/) {
+
+                                $tagfield{$1} = $2;
+                        }
+                }
+                if (exists $vcfstats_f{$tagfield{'TYPE'}}) {
+
+                        $vcfstats_f{$tagfield{'TYPE'}}++;
+                }
+               else {
+
+                        $vcfstats_f{$tagfield{'TYPE'}} = 1;
+                }
+        }
+}
+close($vcffh_f);
+
+print STDERR "\n\t\tSummary variant calling after filtering:\n";
+foreach my $vtype (sort {$vcfstats_f{$b} <=> $vcfstats_f{$a}} keys %vcfstats_f) {
+
+        print STDERR "\t\t\t$vtype\t$vcfstats{$vtype}\n";
+}
+
+
+
 ## Now it will compress and create the index before call the consensus
 
-print STDERR "\n\t3.2- Compressing and indexing variant file\n";
-my @cmd09_bgzip = ($exepath{'bgzip'}, "-c", $variantfile, ">", $variantfile . ".gz");
+print STDERR "\n\t3.3- Compressing and indexing variant file\n";
+my @cmd09_bgzip = ($exepath{'bgzip'}, "-c", $variantfile_filtered, ">", $variantfile_filtered . ".gz");
 my $cmd09_bgzip = join(" ", @cmd09_bgzip);
 
 my @cmd09run = run( command => $cmd09_bgzip, verbose => $opt_V );
@@ -726,7 +777,7 @@ if (!$cmd09run[0]) {
         die("\n\t\tERROR: $cmd09_bgzip run with the error:\n\t$cmd09run[2]->[0]\n");
 }
 
-my @cmd10_tabix = ($exepath{'tabix'}, $variantfile . ".gz");
+my @cmd10_tabix = ($exepath{'tabix'}, $variantfile_filtered . ".gz");
 my $cmd10_tabix = join(" ", @cmd10_tabix);
 
 my @cmd10run = run( command => $cmd10_tabix, verbose => $opt_V );
@@ -736,10 +787,10 @@ if (!$cmd10run[0]) {
 }
 
 ## Now it will call the consensus
-print STDERR "\n\t3.3- Consensus calling with Bcftools\n";
+print STDERR "\n\t3.4- Consensus calling with Bcftools\n";
 
 my $consfile = File::Spec->catfile($cons03dir, $species . "_CHL.consensus.fasta");
-my @cmd11_cons = ("cat", $orgref, "|", $exepath{'bcftools'}, "consensus", "-m", $cov0file, $variantfile . ".gz");
+my @cmd11_cons = ("cat", $orgref, "|", $exepath{'bcftools'}, "consensus", "-m", $cov0file, $variantfile_filtered . ".gz");
 push (@cmd11_cons, "|", "sed", "-r", "\'"."s/>.+/>".$sps_abv."/"."\'", ">", $consfile);
 my $cmd11_cons = join(" ", @cmd11_cons);
 
